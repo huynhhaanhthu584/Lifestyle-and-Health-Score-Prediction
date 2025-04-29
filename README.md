@@ -40,6 +40,7 @@ Identified strong correlations between health score and factors such as sleep du
 Applied standardization and diagnostic plots to evaluate assumptions of linear regression.
 
 Achieved interpretable model with decent predictive performance on synthetic data.
+
 ---
 ## Members
 | **Name**| **Major**| **University**|
