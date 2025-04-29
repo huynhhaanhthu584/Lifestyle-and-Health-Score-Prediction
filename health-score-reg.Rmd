@@ -1,0 +1,875 @@
+---
+title: "Dự đoán chỉ số khỏe mạnh dựa trên lối sống bằng hồi quy tuyến tính"
+author: "Nhóm 26"
+date: "11/02/2024"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+Gọi các thư viện cần dùng
+
+```{r}
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(janitor)
+library(leaps)
+library(boot)
+library(mice)
+library(VIM)
+library(car)
+library(ipred)
+library(splines)
+
+```
+
+# 1. Bảng tóm tắt, khái quát về dữ liệu
+
+```{r}
+ data_health <- read_csv(file = "C:/Users/Huynh Ha Anh Thu/Downloads/synthetic_health_data.csv")
+ data_health <- data_health |> janitor::clean_names()
+ glimpse(data_health)
+```
+
+```{r}
+aggr(data_health, ylab = c("Proportion of missings", "Pattern"), number = TRUE,
+cex.axis = 0.6, cex.numbers = 0.5)
+```
+
+Dụa vào biểu đồ trên, ta thấy không có missing value trong bộ dữ liệu.
+
+```{r}
+summary(data_health)
+```
+
+```{r}
+# Đếm số giá trị âm trong cột alcohol_consumption
+negative_values_count <- sum(data_health$alcohol_consumption < 0, na.rm = TRUE)
+# In kết quả
+cat("Số giá trị âm trong cột alcohol_consumption là:", negative_values_count, "\n")
+```
+
+```{r}
+# Tính phần trăm giá trị âm trong cột 'alcohol_consumption'
+total_count <- nrow(data_health)  
+negative_count <- sum(data_health$alcohol_consumption < 0, na.rm = TRUE)  # Số giá trị âm
+percent_negative <- (negative_count / total_count) * 100  # Phần trăm
+
+# Tạo dataframe cho biểu đồ
+percent_data <- data.frame(
+  Category = c("Negative", "Non-Negative"),
+  Percentage = c(percent_negative, 100 - percent_negative)
+)
+
+# Vẽ biểu đồ
+
+ggplot(percent_data, aes(x = "", y = Percentage, fill = Category)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  labs(
+    title = "Percentage of Negative Values in Alcohol Consumption",
+    fill = "Category"
+  ) +
+  scale_fill_manual(values = c("Negative" = "red", "Non-Negative" = "blue")) +
+  theme_void()
+```
+
+```{r}
+percent_negative
+```
+
+Vì lượng dữ liệu alcohol_consumption có giá trị âm \< 10% nên ta xóa.
+
+```{r}
+# Xóa các giá trị âm trong cột alcohol_consumption
+data_health <- data_health %>%
+  filter(alcohol_consumption >= 0 | is.na(alcohol_consumption))
+
+# Kiểm tra dữ liệu sau khi xóa
+summary(data_health)
+
+```
+
+```{r}
+
+# Làm tròn cột 'age' về số nguyên gần nhất
+data_health$age <- round(as.numeric(data_health$age))
+
+# Xác nhận lại kiểu dữ liệu sau khi làm tròn
+str(data_health)
+```
+
+# 2. Xây dựng mô hình cho điểm sức khỏe.
+
+## (1) Xử lý dữ liệu khuyết và kiểm tra đa cộng tuyến.
+
+Phần xử lý dữ liệu khuyết đã được thực hiện ở trên.
+
+Vẽ đồ thị phân tán của mỗi biến
+
+```{r}
+pairs(data_health)
+```
+
+Ma trận tương quan của mô hình
+
+```{r}
+cor(data_health)
+```
+
+```{r}
+md_health = lm(health_score ~ age+bmi+exercise_frequency+diet_quality+sleep_hours+smoking_status+ alcohol_consumption,data = data_health)
+vif(md_health)
+```
+
+Dựa vào kết quả trên, không bị xuất hiện đa cộng tuyến trong mô hình.
+
+```{r}
+data_health$smoking_status <- as.factor(data_health$smoking_status)
+
+```
+
+```{r}
+data_health
+```
+
+## (2) Xây dựng mô hình
+
+Chạy mô hình ban đầu 
+
+```{r}
+md_health = lm(health_score ~ age+bmi+exercise_frequency+diet_quality+sleep_hours+smoking_status+ alcohol_consumption,data = data_health)
+summary(md_health)
+```
+Dựa vào kết quả trên, ta có Adjusted R-squared: 0.8391 .
+
+```{r}
+ggplot(data_health, aes(x = exercise_frequency, y = health_score, color = smoking_status)) +
+  geom_point(alpha = 0.6) +  # Điểm dữ liệu
+  geom_smooth(method = "lm", se = FALSE) +  # Đường hồi quy riêng cho từng nhóm
+  labs(title = "Interaction: Smoking Status and Exercise Frequency",
+       x = "Exercise Frequency",
+       y = "Health Score") +
+  theme_minimal()
+```
+
+**Nhận xét**: Hai đường này gần như song song với nhau nên không có sự
+tương tác giữa smoking_status và exercise frequency
+
+```{r}
+vars <- c("age", "bmi", "diet_quality", "sleep_hours", "alcohol_consumption")
+
+for (var in vars) {
+  p <- ggplot(data_health, aes_string(x = var, y = "health_score", color = "smoking_status")) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(title = paste("Interaction: Smoking Status and", var),
+         x = var,
+         y = "Health Score") +
+    theme_minimal()
+  print(p)
+}
+```
+
+**Nhận xét**:
+
+Smoking_status và age: Có sự tương tác nhỏ trong độ tuổi từ 0-10 tuổi,
+tuy nhiên vẫn không có sự tương tác rõ rệt ở phần còn lại, cần phải kiểm
+tra kỹ bằng cách chạy mô hình.
+
+Smoking_status và bmi: Hai đường thẳng này song song với nhau, vì thế
+không có sự tương tác giữa 2 thuộc tính này.
+
+Smoking_status và diet_quatily: Hai đường thẳng gần như trùng nhau từ
+giá trị 70 của diet_quality trở sau.
+
+Smoking_status và sleep_hours: Hai đường thẳng có sự tương tác nhỏ khi
+giờ ngủ lớn 7.5 giờ.
+
+Smoking_status và alcohol_consumption: Đường thẳng cắt nhau khi
+alcohol_consumption bằng 0 nghĩa là hai người đều không sử dụng rượu thì
+điểm sức khỏe sẽ bị ảnh hưởng bởi smoking_status, tuy nhiên khi
+alcohol_consumption tăng thì alcohol_consumption và smoking_status không
+có sự tương tác.
+
+
+Tiếp theo, nhóm em sẽ kiểm tra kết quả mô hình với biến tương tác.
+
+```{r}
+# Xây dựng mô hình hồi quy với tương tác giữa smoking_status và age
+md_health_interaction <- lm(health_score ~ age * smoking_status + bmi + exercise_frequency + 
+                            diet_quality + sleep_hours + alcohol_consumption, 
+                            data = data_health)
+
+# Kiểm tra kết quả hồi quy
+summary(md_health_interaction)
+```
+Dựa vào p_value của biến tương tác age:smoking_status1 là 0.4380 nên biến này không có ý nghĩa thống kê, đồng thời Adjusted R-squared:  0.839 thấp hơn so với mô hình không có biến tương tác
+
+-> Không thêm biến tương tác này vào mô hình
+
+```{r}
+md_health_interaction <- lm(health_score ~ smoking_status * sleep_hours + age + bmi + 
+                            exercise_frequency + diet_quality + alcohol_consumption, 
+                            data = data_health)
+
+# Kiểm tra kết quả hồi quy
+summary(md_health_interaction)
+```
+Dựa vào p_value của biến tương tác smoking_status1:sleep_hours là 0.097081 nên biến này  có ý nghĩa thống kê với mức ý nghĩa 10%, đồng thời Adjusted R-squared:  0.8394 có kết quả tốt hơn so với mô hình không có biến tương tác một chút.
+
+-> Tuy nhiên vì p_value vẫn chưa thật sự là nhỏ nên vẫn còn xem xét kết hợp biến tương tác này với các biến khác và kiểm tra xem thử kết quả có tốt hơn không
+
+```{r}
+md_health_interaction <- lm(health_score ~ smoking_status * diet_quality + age + bmi + 
+                            exercise_frequency + sleep_hours + alcohol_consumption, 
+                            data = data_health)
+
+# Kiểm tra kết quả hồi quy
+summary(md_health_interaction)
+```
+Dựa vào p_value của biến tương tác smoking_status1:diet_quality  là 0.0123 nên biến này có ý nghĩa thống kê, đồng thời Adjusted R-squared:  0.84 tốt hơn so với mô hình không có biến tương tác
+
+-> Ta  thêm biến tương tác này vào mô hình
+
+```{r}
+md_health_interaction <- lm(health_score ~ smoking_status * alcohol_consumption + age + bmi + 
+                            exercise_frequency + diet_quality + diet_quality, 
+                            data = data_health)
+
+# Kiểm tra kết quả hồi quy
+summary(md_health_interaction)
+```
+Dựa vào p_value của biến tương tác smoking_status1:alcohol_consumption là 0.23547 nên biến này không có ý nghĩa thống kê, đồng thời Adjusted R-squared:  0.7634 tệ hơn rất nhiều so với mô hình không có biến tương tác
+
+-> Không thêm biến tương tác này nào mô hình
+
+```{r}
+md_health_interaction <- lm(health_score ~ smoking_status * diet_quality + 
+                            smoking_status * sleep_hours + age + bmi + 
+                            exercise_frequency + alcohol_consumption, 
+                            data = data_health)
+
+# Kiểm tra kết quả hồi quy
+summary(md_health_interaction)
+```
+Mô hình cuối sẽ có thêm 2 biến tương tác smoking_status1:diet_quality và smoking_status1:sleep_hours vì p_value của 2 biến tương tác này đều có ý nghĩa thống kê 
+
+Đồng thời Adjusted R-squared:  0.8403 có cải thiện hơn so với mô hình không có biến tương tác
+
+## (3) Lựa chọn mô hình
+
+**Hồi quy từng bước hỗn hợp**
+
+```{r}
+out_subset_health <- regsubsets(x = health_score ~ . + smoking_status : diet_quality + smoking_status : sleep_hours, data = data_health, nvmax = 9, method = "exhaustive")
+sum_out_subset_health <- summary(out_subset_health)
+```
+
+Đánh giá chỉ số Mallows’ Cp của các mô hình con
+
+```{r}
+sum_out_subset_health$cp
+```
+
+Kết quả cho thấy tập kết quả thứ 9 (chứa 9 biến) là tốt nhất. Ước lượng
+hệ số của mô hình tương ứng với tập này
+
+```{r}
+best_model_formula <- coef(out_subset_health, which.min(sum_out_subset_health$cp))
+```
+
+Công thức của mô hình
+
+```{r}
+paste("health_score ~", paste(names(best_model_formula[-1]), collapse = " + "))
+```
+
+Xây dựng mô hình tuyến tính trên các biến vừa chọn
+
+```{r}
+md_health <- lm(health_score ~ . + smoking_status : diet_quality + smoking_status : sleep_hours, data_health)
+summary(md_health)
+```
+
+Đánh giá sai số **RMSE** bằng ***errorest()*** thông qua phương pháp
+cross-validation
+
+```{r}
+set.seed(123)
+# 10-fold
+error10 <- errorest(health_score ~ . + smoking_status : diet_quality + smoking_status : sleep_hours, data = data_health, model = lm)$error
+# 5-fold
+error5 <- errorest(health_score ~ . + smoking_status : diet_quality + smoking_status : sleep_hours, data = data_health, model = lm, est.para = control.errorest(k = 5))$error
+# 50-fold
+error50 <- errorest(health_score ~ . + smoking_status : diet_quality + smoking_status : sleep_hours, data = data_health, model = lm, est.para = control.errorest(k = 50))$error
+error <- data.frame(
+  k = c(5, 10, 50),
+  CV = c(error5, error10, error50)
+)
+print(error)
+```
+
+## (4) Chẩn đoán mô hình
+
+### Kiểm tra tính tuyến tính của mô hình
+
+```{r}
+ggplot(data = md_health, mapping = aes(x = .fitted, y= .resid)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE) + # ve duong cong theo xu huong dl
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x= "Fitted values", y= "Residuals") +
+  theme_bw()
+
+```
+
+**Nhận xét:** Hình vẽ cho thấy một xu hướng đường cong rõ ràng
+
+\=> Có xu hướng phi tuyến tính (dạng hình chữ U).
+
+\=> Giả định về tính tuyến tính của mô hình là không phù hợp
+
+------------------------------------------------------------------------
+
+### Kiểm tra tính tuyến tính từng phần
+
+1.  Age
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_age_md_health <- tibble(
+      age = data_health$age,
+      terms_age = terms_md_health[, "age"],
+      partial_resid_age = partial_resid_md_health[, "age"]
+    )
+
+    ggplot(data_part_resid_age_md_health, mapping = aes(age, partial_resid_age)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = age, y = terms_age), color = "blue") +
+      labs(x = "Age", y = "Partial Residuals") +
+      theme_bw()
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh (ước lượng tuyến tính) cho thấy sự
+phù hợp khá tốt, nhưng có một số phi tuyến nhẹ ở hai đầu khoảng giá trị
+Age. Đường cong xanh lục (ước lượng phi tuyến) chỉ ra sự underestimate
+nhẹ ở khoảng Age \< 25 và overestimate nhẹ ở Age \> 75.
+
+**Kết luận:** Mối quan hệ giữa Age và phần dư là gần tuyến tính, nhưng
+có thể cải thiện nếu sử dụng các biến phi tuyến như spline
+
+2.  BMI
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_bmi_md_health <- tibble(
+      bmi = data_health$bmi,
+      terms_bmi = terms_md_health[, "bmi"],
+      partial_resid_bmi = partial_resid_md_health[, "bmi"]
+    )
+
+    ggplot(data_part_resid_bmi_md_health, mapping = aes(bmi, partial_resid_bmi)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = bmi, y = terms_bmi), color = "blue") +
+      labs(x = "bmi", y = "Partial Residuals") +
+      theme_bw()
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh cho thấy mối quan hệ tuyến tính khá
+tốt. Đường cong xanh lục chỉ ra sự phi tuyến nhẹ ở giá trị BMI \> 35,
+với sự overestimate nhẹ.
+
+**Kết luận:** Mối quan hệ giữa BMI và phần dư là gần tuyến tính. Một số
+phi tuyến nhẹ nhưng không đáng kể. 
+\=> Cân nhắc đưa vào spline
+
+3.  exercise_frequency
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_exercise_frequency_md_health <- tibble(
+      exercise_frequency = data_health$exercise_frequency,
+      terms_exercise_frequency = terms_md_health[, "exercise_frequency"],
+      partial_resid_exercise_frequency = partial_resid_md_health[, "exercise_frequency"]
+    )
+
+    ggplot(data_part_resid_exercise_frequency_md_health, mapping = aes(exercise_frequency, partial_resid_exercise_frequency)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = exercise_frequency, y = terms_exercise_frequency), color = "blue") +
+      labs(x = "exercise_frequency", y = "Partial Residuals") +
+      theme_bw()
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh cho thấy một xu hướng tăng nhẹ giữa
+exercise_frequency và phần dư từng phần. Mối quan hệ giữa
+exercise_frequency và phần dư từng phần là gần tuyến tính, được thể hiện
+qua đường thẳng xanh lam. Phi tuyến nhẹ: đường cong xanh lục gần như
+trùng khớp với đường thẳng xanh lam, cho thấy không có sự phi tuyến đáng
+kể.
+
+**Kết luận:** exercise_frequency có đóng góp đáng kể trong mô hình hồi
+quy, và mối quan hệ tuyến tính hiện tại là phù hợp.
+
+4.  diet_quality
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_diet_quality_md_health <- tibble(
+      diet_quality  = data_health$diet_quality ,
+      terms_diet_quality  = terms_md_health[, "diet_quality"],
+      partial_resid_diet_quality  = partial_resid_md_health[, "diet_quality"]
+    )
+
+    ggplot(data_part_resid_diet_quality_md_health, mapping = aes(diet_quality , partial_resid_diet_quality)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = diet_quality , y = terms_diet_quality ), color = "blue") +
+      labs(x = "diet_quality", y = "Partial Residuals") +
+      theme_bw()
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh phù hợp khá tốt với dữ liệu, nhưng có
+một số phi tuyến nhẹ ở các giá trị diet_quality \< 40 và diet_quality \>
+90. Đường cong xanh lục thể hiện sự phi tuyến ở các phần dư ngoài rìa.
+
+**Kết luận:** Mối quan hệ giữa diet_quality và phần dư là tuyến tính,
+nhưng có thể cải thiện bằng cách thêm biến phi tuyến nếu cần.
+
+5.  sleep_hours
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_sleep_hours_md_health <- tibble(
+      sleep_hours  = data_health$sleep_hours,
+      terms_sleep_hours= terms_md_health[, "sleep_hours"],
+      partial_resid_sleep_hours = partial_resid_md_health[, "sleep_hours"]
+    )
+
+    ggplot(data_part_resid_sleep_hours_md_health, mapping = aes(sleep_hours, partial_resid_sleep_hours)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = sleep_hours, y = terms_sleep_hours), color = "blue") +
+      labs(x = "sleep_hours", y = "Partial Residuals") +
+      theme_bw()
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh phù hợp tốt với dữ liệu, nhưng có một
+số sự underestimate ở sleep_hours \< 5. Đường cong xanh lục thể hiện sự
+phi tuyến nhẹ ở đầu khoảng dữ liệu.
+
+**Kết luận:** Mối quan hệ giữa sleep_hours và phần dư là gần tuyến tính,
+nhưng có thể sử dụng spline để cải thiện nếu cần
+
+6.  alcohol_consumption
+
+    ```{r}
+    terms_md_health <- predict(md_health, type = "terms") 
+    head(terms_md_health)
+
+    partial_resid_md_health <- residuals(md_health, type = "partial")
+    head(partial_resid_md_health)
+
+    data_part_resid_alcohol_consumption_md_health <- tibble(
+      alcohol_consumption= data_health$alcohol_consumption,
+      terms_alcohol_consumption= terms_md_health[, "alcohol_consumption"],
+      partial_resid_alcohol_consumption = partial_resid_md_health[, "alcohol_consumption"]
+    )
+
+    ggplot(data_part_resid_alcohol_consumption_md_health, mapping = aes(alcohol_consumption, partial_resid_alcohol_consumption)) +
+      geom_point()+
+      geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+                  color = "forestgreen") +
+      geom_line(aes(x = alcohol_consumption, y = terms_alcohol_consumption), color = "blue") +
+      labs(x = "alcohol_consumption", y = "Partial Residuals") +
+      theme_bw()
+
+    ```
+
+**Nhận xét:** Đường thẳng màu xanh thể hiện mối quan hệ tuyến tính khá
+tốt, nhưng có sự phi tuyến nhẹ ở các giá trị alcohol_consumption \> 6.
+Đường cong xanh lục chỉ ra một số điểm overestimate ở phần dư.
+
+**Kết luận:** Mối quan hệ giữa alcohol_consumption và phần dư là gần
+tuyến tính
+
+------------------------------------------------------------------------
+
+### Kiểm tra tính đồng nhất phương sai
+
+```{r}
+ggplot(md_health, aes(.fitted, sqrt(abs(.stdresid)))) +
+  geom_point(na.rm = TRUE) +
+  geom_smooth(method = "loess", na.rm = TRUE, se = FALSE) +
+  labs(x = "Fitted Values", y = expression(sqrt("|Standardized residuals|"))) +
+  theme_bw()
+```
+
+**Nhận xét:** Đường cong màu xanh cho thấy xu hướng không đồng nhất
+trong phương sai của phần dư khi giá trị Fitted Values thay đổi. Phương
+sai giảm ở các giá trị Fitted Values thấp (khoảng 60-80). Phương sai
+tăng mạnh ở hai đầu (Fitted Values nhỏ hơn 60 và lớn hơn 100).
+
+\=> Các phần dư không phân tán đồng đều quanh đường ngang, cho thấy
+phương sai thay đổi (heteroscedasticity).
+
+------------------------------------------------------------------------
+
+### Kiểm tra tính độc lập thặng dư
+
+```{r}
+residuals_md_health <- residuals(md_health)
+acf(residuals_md_health, main = "ACF của thặng dư")
+```
+
+**Nhận xét:** các giá trị ACF nằm trong dải tin cậy - Thặng dư không có
+tương quan đáng kể
+
+\=> Đáp ứng giả định độc lập.
+
+------------------------------------------------------------------------
+
+### Kiểm tra điểm ngoại lai trong mô hình
+
+Sử dụng biểu đồ Residuals vs Leverage.
+
+```{r}
+ggplot(md_health, aes(.hat, .stdresid)) +
+  geom_point(aes(size = .cooksd)) +
+  xlab("Leverage") + ylab("Standardized Residuals") +
+  scale_size_continuous("Cook's Distance", range = c(1, 6)) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+**Nhận xét:** Phần lớn các điểm có giá trị Cooks Distance nhỏ (\< 0.02)
+và Phần lớn các điểm có leverage thấp (nhỏ hơn 0.015)
+
+\=> Các giá trị ngoại lai sẽ không ảnh hưởng đến mô hình hồi quy
+
+```{r}
+std_resid_md_health <- rstandard(md_health)
+hat_values_md_health <- hatvalues(md_health)
+cooks_D_md_health <- cooks.distance(md_health)
+
+data_cooks_md_health <- tibble(id_point = 1:nrow(data_health), rstand = std_resid_md_health, hats = hat_values_md_health, cooks = cooks_D_md_health, heath_score = data_health$health_score)
+
+data_cooks_md_health |> arrange(desc(cooks))
+```
+
+**Nhận xét:** Điểm 336 có giá trị Cooks Distance cao nhất (0.0618):Đây
+là điểm có ảnh hưởng mạnh nhất đến mô hình. rstand=−4.77: thặng dư chuẩn
+hóa không quá 5, có thể chấp nhận được. hats=0.0212: Giá trị leverage
+vừa phải.
+
+## (5) Mở rộng mô hình
+
+```{r}
+# Xác định các nút (knots) cho các biến liên tục
+knots_age <- quantile(data_health$age, probs = c(0.25, 0.5, 0.75))
+knots_bmi <- quantile(data_health$bmi, probs = c(0.25, 0.5, 0.75))
+knots_diet <- quantile(data_health$diet_quality, probs = c(0.25, 0.5, 0.75))
+knots_sleep <- quantile(data_health$sleep_hours, probs = c(0.25, 0.5, 0.75))
+
+# Xây dựng mô hình spline
+md_health_spline <- lm(
+  health_score ~ smoking_status * bs(diet_quality, knots = knots_diet, degree = 3) + 
+    smoking_status * bs(sleep_hours, knots = knots_sleep, degree = 3) + 
+    bs(age, knots = knots_age, degree = 3) + 
+    bs(bmi, knots = knots_bmi, degree = 3) + 
+    exercise_frequency + alcohol_consumption,
+  data = data_health
+)
+
+# Tóm tắt mô hình spline
+summary(md_health_spline)
+
+
+# Mô hình tuyến tính cơ bản
+md_health_linear <- lm(health_score ~ smoking_status * diet_quality + 
+                         smoking_status * sleep_hours + age + bmi + 
+                         exercise_frequency + alcohol_consumption, 
+                       data = data_health)
+
+
+# So sánh R-squared và AIC
+cat("Linear model R-squared:", summary(md_health_linear)$r.squared, "\n")
+cat("Spline model R-squared:", summary(md_health_spline)$r.squared, "\n")
+
+cat("Linear model AIC:", AIC(md_health_linear), "\n")
+cat("Spline model AIC:", AIC(md_health_spline), "\n")
+
+
+
+```
+
+**Nhận xét:** Sau khi dùng Splines để cải thiện các mối quan hệ phi
+tuyến nhẹ thì ta thấy có sự cải thiện ở chỉ số R-squared và AIC cho thấy
+Splines có hiệu quả tốt hơn.
+
+## (6) Suy luận cho mô hình 
+### Ước lượng của hệ số bằng phương pháp boostrap
+
+```{r}
+fun_boot_md <- function(data, ind, formula, ...){
+data_new <- data[ind,]
+out_md <- lm(formula = formula, data = data_new, ...)
+return(out_md$coefficients)
+}  
+
+library(boot)
+set.seed(84)
+md_health = lm(health_score ~ age+bmi+exercise_frequency+diet_quality+sleep_hours+smoking_status+ alcohol_consumption,data = data_health)
+out_boot_md_health <- boot(data = data_health, statistic = fun_boot_md, R = 1000,
+formula =  health_score ~ age+bmi+exercise_frequency+diet_quality+sleep_hours+smoking_status+ alcohol_consumption)
+out_boot_md_health
+```
+
+```{r}
+# Trích xuất kết quả bootstrap của các hệ số
+boot_coefficients <- as.data.frame(out_boot_md_health$t)
+names(boot_coefficients) <- names(coef(md_health))
+
+# Tính độ rộng binwidth cho từng hệ số
+n=10 #chia histogram thành 10 khoảng
+binwidth_age <- (max(boot_coefficients$age) - min(boot_coefficients$age)) / n
+binwidth_bmi <- (max(boot_coefficients$bmi) - min(boot_coefficients$bmi)) /n
+binwidth_exercise_frequency <- (max(boot_coefficients$exercise_frequency) - min(boot_coefficients$exercise_frequency)) / n
+binwidth_diet_quality <- (max(boot_coefficients$diet_quality) - min(boot_coefficients$diet_quality)) /n
+binwidth_sleep_hours <- (max(boot_coefficients$sleep_hours) - min(boot_coefficients$sleep_hours)) /n
+binwidth_smoking_status <- (max(boot_coefficients$smoking_status) - min(boot_coefficients$smoking_status)) /n
+binwidth_alcohol_consumption <- (max(boot_coefficients$alcohol_consumption) - min(boot_coefficients$alcohol_consumption)) 
+
+
+# Histogram cho hệ số 'age'
+ggplot(boot_coefficients, aes(x = age)) +
+  geom_histogram(binwidth = binwidth_age, fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'age'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+```{r}
+# Histogram cho hệ số 'bmi'
+ggplot(boot_coefficients, aes(x = bmi)) +
+  geom_histogram(binwidth = binwidth_bmi, fill = "pink", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'bmi'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+```{r}
+ggplot(boot_coefficients, aes(x = exercise_frequency)) +
+  geom_histogram(binwidth = binwidth_exercise_frequency, fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'exercise_frequency'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+```{r}
+ggplot(boot_coefficients, aes(x = diet_quality)) +
+  geom_histogram(binwidth = binwidth_diet_quality, fill = "pink", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'diet_quality'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+```{r}
+ggplot(boot_coefficients, aes(x = smoking_status1)) +
+  geom_histogram(binwidth = binwidth_smoking_status, fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'smoking_status'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+```{r}
+ggplot(boot_coefficients, aes(x = alcohol_consumption)) +
+  geom_histogram(binwidth = binwidth_alcohol_consumption, fill = "pink", color = "black") +
+  theme_minimal() +
+  labs(title = "Histogram of Bootstrap Estimates for 'alcohol_consumption'",
+       x = "Bootstrap Estimates",
+       y = "Frequency")
+```
+
+Nhận xét về phân phối mẫu của dữ liệu Tìm khoảng tin cậy cho các hệ số
+bằng phương pháp boostrap.
+
+```{r}
+boot.ci(out_boot_md_health, index = 1, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 2, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 3, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 4, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 5, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 6, type = "perc", conf = 0.95)
+```
+
+```{r}
+boot.ci(out_boot_md_health, index = 7, type = "perc", conf = 0.95)
+```
+
+Tiếp theo, chúng ta kiểm định giả thuyết βj = 0, như sau:
+
+```{r}
+pvals_adv2 <- sapply(1:ncol(out_boot_md_health$t),function(x) {
+qt0 <- mean(out_boot_md_health$t[, x] <= 0)
+if (qt0 < 0.5) {
+return(2*qt0)
+} else {
+return(2*(1 - qt0))
+}
+})
+pvals_adv2
+```
+
+## (7) Tiên đoán
+
+```{r}
+# Tiên đoán thử nghiệm cho mô hình từ một mẫu ngẫu nhiên
+
+new_data <- data.frame(
+  age = 30,
+  bmi = 25,
+  exercise_frequency = 3,
+  diet_quality = 70,
+  sleep_hours = 7,
+  smoking_status = factor(0, levels = levels(data_health$smoking_status)), # Chuyển đổi thành factor
+  alcohol_consumption = 2
+)
+
+# Tiến hành dự đoán
+y_hat <- predict(md_health_spline, newdata = new_data)
+y_hat
+
+```
+
+```{r}
+# Khoảng tin cậy boostrap
+set.seed(123) # Để đảm bảo tính tái lập
+R <- 1000
+bootstrap_means <- replicate(R, {
+  sample_indices <- sample(1:nrow(data_health), replace = TRUE)
+  bootstrap_data <- data_health[sample_indices, ]
+  bootstrap_model <- lm(health_score ~ age + bmi + exercise_frequency + diet_quality +
+                          sleep_hours + smoking_status + alcohol_consumption, 
+                        data = bootstrap_data)
+  predict(bootstrap_model, newdata = new_data)
+})
+
+# Khoảng tin cậy 95%
+quantile(bootstrap_means, probs = c(0.025, 0.975))
+
+```
+
+Khoảng tin cậy khá hẹp, cho thấy sự chính xác của việc ước lượng giá trị
+trung bình tổng thể.
+
+Điều này có thể ngụ ý rằng mẫu dữ liệu được lấy khá đại diện cho tổng
+thể, hoặc độ dao động của dữ liệu là tương đối thấp.
+
+```{r}
+
+# Khoảng dự đoán boostrap
+set.seed(123)
+bootstrap_predictions <- replicate(R, {
+  sample_indices <- sample(1:nrow(data_health), replace = TRUE)
+  bootstrap_data <- data_health[sample_indices, ]
+  bootstrap_model <- lm(health_score ~ age + bmi + exercise_frequency + diet_quality +
+                          sleep_hours + smoking_status + alcohol_consumption, 
+                        data = bootstrap_data)
+  y_hat <- predict(bootstrap_model, newdata = new_data)
+  residual <- sample(residuals(bootstrap_model), size = 1, replace = TRUE)
+  y_hat + residual
+})
+
+# Khoảng dự đoán 95%
+quantile(bootstrap_predictions, probs = c(0.025, 0.975))
+
+
+```
+
+Khoảng dự đoán rộng hơn nhiều so với khoảng tin cậy, phản ánh sự biến
+động lớn hơn ở cấp độ từng quan sát so với giá trị trung bình.
+
+Điều này là do khoảng dự đoán phải tính đến cả phương sai của tổng thể
+và sai số của từng điểm dữ liệu, khiến khoảng này rộng hơn.
+
+**Nhận xét:** Nếu cần xác định giá trị trung bình của tổng thể, chúng ta
+dựa vào khoảng tin cậy. Ngược lại, nếu muốn dự đoán giá trị cụ thể trong
+tương lai, khoảng dự đoán sẽ được sử dụng.
+
+# 3. Viết các nhận xét và kết luận.
+
+**Nhận xét:**
+- Hút thuốc lá (smoking_status): Có tác động tiêu cực nhẹ nhưng không đáng kể
+- Chế độ ăn uống (diet_quality): tác động mạnh mẽ và phi tuyến tính.
+- Giấc ngủ (sleep_hours): Tăng thời gian ngủ từ 5 đến 8 giờ/ngày có tác động tích cực lên điểm sức khỏe (β = 7.26 đến 23.58, p-value < 0.05). Tuy nhiên, tác động trở nên không rõ ràng ở các khoảng giấc ngủ cao hơn hoặc thấp hơn.
+- Tuổi tác (age): Có tác động tiêu cực, đặc biệt ở các nhóm tuổi từ trung niên đến cao tuổi (β = -9.95 đến -27.35, p-value < 0.01). Điều này phản ánh rằng tuổi tác lớn hơn thường đi kèm với giảm sức khỏe, ngay cả khi lối sống được điều chỉnh.
+- Chỉ số BMI: Ảnh hưởng tiêu cực rõ ràng, đặc biệt khi BMI vượt qua giá trị 25 (β = -11.85 đến -36.54, p-value < 0.001). Kết quả này cho thấy thừa cân hoặc béo phì có tác động nghiêm trọng đến sức khỏe tổng thể.
+- Tần suất tập thể dục (exercise_frequency): Có mối quan hệ tuyến tính rõ ràng với điểm sức khỏe (β = 1.87, p-value < 0.001). Tăng 1 ngày tập thể dục/tuần có thể cải thiện điểm sức khỏe đáng kể.
+- Tiêu thụ rượu bia (alcohol_consumption): Có tác động tiêu cực rõ ràng (β = -0.98, p-value < 0.001). Mỗi lít rượu tiêu thụ hàng tuần làm giảm điểm sức khỏe đáng kể.
+
++ Tác động tích cực: Chế độ ăn uống lành mạnh và giấc ngủ trong khoảng 7–8 giờ/ngày,siêng năng tập thể dục.
+
+**Kết luận:**
+Lời khuyên:
+Khuyến khích chế độ ăn uống lành mạnh và giấc ngủ hợp lý.
+Hạn chế tiêu thụ rượu bia và giảm chỉ số BMI thông qua tập thể dục đều đặn.
+Phân tích sâu hơn: Chúng ta có thể 
+Nghiên cứu thêm về tương tác của hút thuốc và các yếu tố khác để có cái nhìn rõ hơn.
+Xem xét các mô hình phi tuyến khác để xác nhận kết quả
